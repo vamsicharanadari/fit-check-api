@@ -1,15 +1,27 @@
 import csv
 import httpx
 import os
+import re
 
 from io import StringIO
 from dotenv import load_dotenv
 from bson import ObjectId
 from fastapi import FastAPI, Body, UploadFile, File, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
+from pydantic import BaseModel, Field
+from typing import List, Optional
 
 app = FastAPI()
 load_dotenv()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # or ["http://localhost:3000", "http://your-ip:port"]
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Read environment variables
 MONGO_URI = os.getenv("MONGO_URI")
@@ -21,6 +33,12 @@ client = AsyncIOMotorClient(MONGO_URI)
 db = client[DB_NAME]
 exerciseCollection = db["exercise"]
 routineCollection = db["routine"]
+
+
+class RoutineModel(BaseModel):
+    name: str = Field(..., example="Full Body Workout")
+    description: Optional[str] = Field("", example="Covers all major muscle groups")
+    exercise_ids: List[str] = Field(default_factory=list, example=["609e129e8c8b0c6f78f6901f"])
 
 @app.get("/")
 async def root():
@@ -37,9 +55,15 @@ async def startup_event():
     await exerciseCollection.create_index("title")
 
 
+def clean_title(raw_title: str) -> str:
+    cleaned = re.sub(r'[^A-Za-z\s]', '', raw_title).strip().lower()
+    return ' '.join(word.capitalize() for word in cleaned.split())
+
+
+
 @app.get("/exercises/search")
 async def search_google_images(title: str = Query(..., description="Exercise title to search or insert")):
-    normalized_title = title.strip().lower()
+    normalized_title = clean_title(title)
 
     # Step 1: Search in DB
     query = {"title": {"$regex": f"^{normalized_title}$", "$options": "i"}}
@@ -151,11 +175,23 @@ async def upload_exercises_csv(file: UploadFile = File(...)):
     reader = csv.DictReader(StringIO(decoded))
 
     # Convert CSV rows to list of dicts
+    seen_titles = set()
     exercises = []
     for row in reader:
         # Clean keys to match DB schema
+        raw_title = row.get("Title", "").strip()
+
+        # Clean title: remove special chars/numbers, lowercase
+        cleaned = re.sub(r'[^A-Za-z\s]', '', raw_title).strip().lower()
+        formatted_title = ' '.join(word.capitalize() for word in cleaned.split())
+
+        if not formatted_title or formatted_title in seen_titles:
+            continue  # Skip empty or duplicate titles
+
+        seen_titles.add(formatted_title)
+
         exercise = {
-            "title": row.get("Title", "").strip().lower(),
+            "title": formatted_title,
             "description": row.get("Desc", "").strip(),
             "type": row.get("Type", "").strip(),
             "body_part": row.get("BodyPart", "").strip(),
@@ -204,3 +240,48 @@ async def update_gif_url_by_id(data: dict = Body(...)):
         raise HTTPException(status_code=404, detail=f"No exercise found with id '{exercise_id}'")
 
     return {"message": f"gifUrl updated for exercise with id '{exercise_id}'"}
+
+
+@app.get("/routines/{id}")
+async def get_routine_by_id(id: str):
+    try:
+        obj_id = ObjectId(id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid ID format")
+
+    routine = await routineCollection.find_one({"_id": obj_id})
+    if not routine:
+        raise HTTPException(status_code=404, detail="Routine not found")
+
+    routine["_id"] = str(routine["_id"])
+    return routine
+
+
+@app.get("/routines")
+async def get_routines():
+    routines = []
+    cursor = routineCollection.find()
+    async for document in cursor:
+        document["_id"] = str(document["_id"])
+        routines.append(document)
+    return {"routines": routines}
+
+
+@app.post("/routines")
+async def create_routine(routine: RoutineModel):
+    result = await routineCollection.insert_one(routine.dict())
+    return {"inserted_id": str(result.inserted_id)}
+
+
+@app.put("/routines/{id}")
+async def update_routine(id: str, updated_data: RoutineModel):
+    try:
+        obj_id = ObjectId(id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid ID format")
+
+    result = await routineCollection.update_one({"_id": obj_id}, {"$set": updated_data.dict()})
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Routine not found")
+
+    return {"message": "Routine updated successfully"}
