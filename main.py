@@ -60,6 +60,20 @@ def clean_title(raw_title: str) -> str:
     return ' '.join(word.capitalize() for word in cleaned.split())
 
 
+@app.get("/exercises/title")
+async def get_exercise_by_title(title: str = Query(..., description="Exact title to look up")):
+    normalized_title = clean_title(title)
+    query = {"title": {"$regex": f"^{normalized_title}$", "$options": "i"}}
+
+    existing_doc = await exerciseCollection.find_one(query)
+
+    if not existing_doc:
+        raise HTTPException(status_code=404, detail="Exercise not found")
+
+    # Convert _id to string before returning
+    existing_doc["_id"] = str(existing_doc["_id"])
+    return existing_doc
+
 
 @app.get("/exercises/search")
 async def search_google_images(title: str = Query(..., description="Exercise title to search or insert")):
@@ -242,21 +256,6 @@ async def update_gif_url_by_id(data: dict = Body(...)):
     return {"message": f"gifUrl updated for exercise with id '{exercise_id}'"}
 
 
-@app.get("/routines/{id}")
-async def get_routine_by_id(id: str):
-    try:
-        obj_id = ObjectId(id)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid ID format")
-
-    routine = await routineCollection.find_one({"_id": obj_id})
-    if not routine:
-        raise HTTPException(status_code=404, detail="Routine not found")
-
-    routine["_id"] = str(routine["_id"])
-    return routine
-
-
 @app.get("/routines")
 async def get_routines():
     routines = []
@@ -285,3 +284,58 @@ async def update_routine(id: str, updated_data: RoutineModel):
         raise HTTPException(status_code=404, detail="Routine not found")
 
     return {"message": "Routine updated successfully"}
+
+
+@app.post("/routines/upload-csv")
+async def upload_routines_csv(file: UploadFile = File(...)):
+    content = await file.read()
+    decoded = content.decode("utf-8")
+    reader = csv.DictReader(StringIO(decoded))
+
+    routine_map = {}
+
+    for row in reader:
+        routine_name = row.get("Routine", "").strip()
+        muscle_group = row.get("MuscleGroup", "").strip()
+        exercise_title = row.get("Exercise", "").strip()
+        set_num = row.get("Set", "").strip()
+        reps = row.get("Reps", "").strip()
+        weight = row.get("Weight", "").strip()
+
+        if not all([routine_name, muscle_group, exercise_title]):
+            continue  # Skip incomplete rows
+
+        # Nest structure: Routine -> MuscleGroup -> Exercise -> Sets
+        routine = routine_map.setdefault(routine_name, {})
+        group = routine.setdefault(muscle_group, {})
+        exercise = group.setdefault(exercise_title, [])
+        exercise.append([set_num, reps, weight])
+
+    routines_to_insert = []
+    for routine_name, groups in routine_map.items():
+        group_list = []
+        for group_name, exercises in groups.items():
+            exercise_list = []
+            for exercise_title, sets in exercises.items():
+                exercise_list.append({
+                    "title": exercise_title,
+                    "table": sets
+                })
+            group_list.append({
+                "title": group_name,
+                "exercises": exercise_list
+            })
+        routines_to_insert.append({
+            "name": routine_name,
+            "description": "",  # You can customize this if needed
+            "groups": group_list
+        })
+
+    if not routines_to_insert:
+        return {"message": "No valid routines found in CSV"}
+
+    result = await routineCollection.insert_many(routines_to_insert)
+    return {
+        "inserted_count": len(result.inserted_ids),
+        "inserted_ids": [str(id) for id in result.inserted_ids]
+    }
