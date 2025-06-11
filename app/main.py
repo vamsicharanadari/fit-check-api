@@ -29,7 +29,16 @@ DB_NAME = os.getenv("DB_NAME", "fit-check-db")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 GOOGLE_CX = os.getenv("GOOGLE_CX")
 
-client = AsyncIOMotorClient(MONGO_URI)
+# Initialize MongoDB client with TLS configuration
+client = AsyncIOMotorClient(
+    MONGO_URI,
+    tls=True,
+    tlsAllowInvalidCertificates=False,  # Never disable cert validation in production
+    serverSelectionTimeoutMS=10000,
+    connectTimeoutMS=20000,
+    socketTimeoutMS=20000
+)
+
 db = client[DB_NAME]
 exerciseCollection = db["exercise"]
 routineCollection = db["routine"]
@@ -52,7 +61,10 @@ async def say_hello(name: str):
 
 @app.on_event("startup")
 async def startup_event():
-    await exerciseCollection.create_index("title")
+    try:
+        await exerciseCollection.create_index("title")
+    except Exception as e:
+        print(f"Index creation error: {e}")
 
 
 def clean_title(raw_title: str) -> str:
