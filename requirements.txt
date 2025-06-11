@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+python-dotenv
+motor
+httpx
+pydantic
+motor
+python-multipart
