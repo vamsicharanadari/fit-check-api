@@ -2,6 +2,7 @@ import csv
 import httpx
 import os
 import re
+import json
 
 from io import StringIO
 from dotenv import load_dotenv
@@ -22,6 +23,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Path to your fallback file
+FALLBACK_JSON_PATH = "fallback_routines.json"
+
+# Global flag
+db_connected = True
+fallback_routines = []
 
 # Read environment variables
 MONGO_URI = os.getenv("MONGO_URI")
@@ -61,10 +69,18 @@ async def say_hello(name: str):
 
 @app.on_event("startup")
 async def startup_event():
+    global db_connected, fallback_routines
     try:
         await exerciseCollection.create_index("title")
     except Exception as e:
-        print(f"Index creation error: {e}")
+        print(f"DB connection/index creation failed: {e}")
+        db_connected = False
+        try:
+            with open(FALLBACK_JSON_PATH, "r") as f:
+                fallback_routines = json.load(f)
+            print("Loaded fallback routines from JSON file.")
+        except Exception as json_err:
+            print(f"Failed to load fallback JSON file: {json_err}")
 
 
 def clean_title(raw_title: str) -> str:
@@ -270,6 +286,9 @@ async def update_gif_url_by_id(data: dict = Body(...)):
 
 @app.get("/routines")
 async def get_routines():
+    if not db_connected:
+        return {"routines": fallback_routines}
+
     routines = []
     cursor = routineCollection.find()
     async for document in cursor:
